@@ -1,9 +1,12 @@
 """
-Pocket Jarvis - Phase 1
-Minimal Telegram long-polling bot. Proves the pipe works: you message the
-bot from anywhere, the phone (running this script) receives and replies.
+Pocket Jarvis - Phase 2
+Telegram long-polling bot that can now trigger real device actions via
+actions.py (MacroDroid webhooks in Path A). Commands are still literal
+for now, e.g. "/open playstore" or "/type hello world" - natural language
+parsing arrives in Phase 3 with PocketClaw.
 
-No AI, no device control yet - that's Phase 2/3. This is just plumbing.
+Every command is confirmed back to you after execution, and every action
+is written to the audit log by actions.py before it runs.
 """
 
 import os
@@ -11,6 +14,8 @@ import time
 import logging
 import requests
 from dotenv import load_dotenv
+
+import actions
 
 load_dotenv()
 
@@ -64,11 +69,47 @@ def handle_message(message):
 
     log.info("Received: %s", text)
 
-    # Phase 1: just echo. Phase 3 replaces this with PocketClaw reasoning,
-    # Phase 2 adds actual device actions in between.
-    reply = f"Pocket Jarvis received: {text}"
+    try:
+        reply = dispatch_command(text)
+    except Exception as e:
+        log.exception("Action failed: %s", e)
+        reply = f"⚠️ Action failed: {e}"
+
     send_message(chat_id, reply)
     log.info("Replied.")
+
+
+def dispatch_command(text):
+    """
+    Phase 2: literal command parsing only.
+    Phase 3 replaces this whole function with PocketClaw reasoning -
+    natural language in, action calls out. Keeping it this dumb for now
+    makes it easy to verify the control layer works before adding an LLM
+    on top of it.
+    """
+    text = text.strip()
+
+    if text.startswith("/open"):
+        app_hint = text[len("/open"):].strip() or "default"
+        actions.open_app(app_hint)
+        return f"✅ Opened: {app_hint}"
+
+    if text.startswith("/type"):
+        content = text[len("/type"):].strip()
+        if not content:
+            return "Usage: /type <text to type>"
+        actions.type_text(content)
+        return f"✅ Typed: {content}"
+
+    if text in ("/help", "/start"):
+        return (
+            "Pocket Jarvis (Phase 2)\n\n"
+            "/open <app>  - open an app (bound in MacroDroid)\n"
+            "/type <text> - type into the currently focused field\n"
+        )
+
+    # Fallback: still echo, same as Phase 1, for anything unrecognized.
+    return f"Pocket Jarvis received: {text}\n(unrecognized command - try /help)"
 
 
 def main():

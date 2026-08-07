@@ -1,1 +1,16 @@
-.env.example
+# Secrets - never commit these
+.env
+*.token
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs (audit log is personal usage history - don't publish it)
+*.log
+logs/
+
+# OS junk
+.DS_Store
