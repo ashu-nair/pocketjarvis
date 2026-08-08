@@ -15,9 +15,9 @@ import logging
 import requests
 from dotenv import load_dotenv
 
+load_dotenv()
 import actions
 
-load_dotenv()
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = os.environ.get("TELEGRAM_USER_ID")
