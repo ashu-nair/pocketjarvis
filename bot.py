@@ -1,12 +1,9 @@
 """
-Pocket Jarvis - Phase 2
-Telegram long-polling bot that can now trigger real device actions via
-actions.py (MacroDroid webhooks in Path A). Commands are still literal
-for now, e.g. "/open playstore" or "/type hello world" - natural language
-parsing arrives in Phase 3 with PocketClaw.
-
-Every command is confirmed back to you after execution, and every action
-is written to the audit log by actions.py before it runs.
+Pocket Jarvis - Phase 3
+Telegram long-polling bot that triggers real device actions via actions.py.
+Literal commands (/open, /type) still work as a fast/power-user path.
+Anything else is routed through reasoning.py, which calls the Gemini API
+to turn natural language into a structured action call.
 """
 
 import os
@@ -17,6 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 import actions
+import reasoning
 
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -81,11 +79,11 @@ def handle_message(message):
 
 def dispatch_command(text):
     """
-    Phase 2: literal command parsing only.
-    Phase 3 replaces this whole function with PocketClaw reasoning -
-    natural language in, action calls out. Keeping it this dumb for now
-    makes it easy to verify the control layer works before adding an LLM
-    on top of it.
+    Literal /open and /type stay as a fast, unambiguous power-user path.
+    Anything else falls through to reasoning.py (Gemini) for natural
+    language parsing. If Gemini's output doesn't parse into a valid,
+    fully-specified action, this fails safely — no action is executed
+    and the user is told rather than guessing.
     """
     text = text.strip()
 
@@ -103,18 +101,40 @@ def dispatch_command(text):
 
     if text in ("/help", "/start"):
         return (
-            "Pocket Jarvis (Phase 2)\n\n"
-            "/open <app>  - open an app (bound in MacroDroid)\n"
-            "/type <text> - type into the currently focused field\n"
+            "Pocket Jarvis (Phase 3)\n\n"
+            "/open <app>   - open an app directly\n"
+            "/type <text>  - type into the currently focused field\n"
+            "Anything else - handled via natural language (Gemini)\n"
         )
 
-    # Fallback: still echo, same as Phase 1, for anything unrecognized.
-    return f"Pocket Jarvis received: {text}\n(unrecognized command - try /help)"
+    # Phase 3: route anything non-literal through the reasoning layer.
+    try:
+        result = reasoning.parse_command(text)
+    except reasoning.ReasoningError as e:
+        log.warning("Reasoning failed for %r: %s", text, e)
+        return "🤔 Sorry, I didn't understand that — try a literal /open or /type command."
+
+    action, args = result["action"], result["args"]
+
+    if action == "open_app":
+        actions.open_app(args["package"])
+        return f"✅ Opened: {args['package']}"
+
+    if action == "type_text":
+        actions.type_text(args["text"])
+        return f"✅ Typed: {args['text']}"
+
+    if action == "tap":
+        actions.tap(args["x"], args["y"])
+        return f"✅ Tapped: ({args['x']}, {args['y']})"
+
+    # action == "none"
+    return "🤔 Not sure what you meant — try being more specific."
 
 
 def main():
     validate_config()
-    log.info("Pocket Jarvis Phase 1 starting. Polling for messages...")
+    log.info("Pocket Jarvis Phase 3 starting. Polling for messages...")
 
     offset = None
     while True:

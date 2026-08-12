@@ -20,6 +20,7 @@ log = logging.getLogger("pocket-jarvis.actions")
 # LocalHttpServer (Path B), not MacroDroid webhooks.
 OPEN_APP_URL = os.environ.get("POCKETJARVIS_OPEN_APP_URL")
 TYPE_TEXT_URL = os.environ.get("POCKETJARVIS_TYPE_TEXT_URL")
+TAP_URL = os.environ.get("POCKETJARVIS_TAP_URL")
 
 AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "logs/audit.log")
 
@@ -51,7 +52,7 @@ def _call(url_base, label):
         raise RuntimeError(
             f"No URL configured for '{label}'. "
             f"Set it in .env (see POCKETJARVIS_OPEN_APP_URL / "
-            f"POCKETJARVIS_TYPE_TEXT_URL)."
+            f"POCKETJARVIS_TYPE_TEXT_URL / POCKETJARVIS_TAP_URL)."
         )
     resp = requests.get(url_base, timeout=10)
     resp.raise_for_status()
@@ -81,3 +82,21 @@ def type_text(text: str):
 
     url = f"{TYPE_TEXT_URL}{quote(text)}"
     _call(url, "type_text")
+
+
+def tap(x: int, y: int):
+    """
+    Tell the phone to tap a specific screen coordinate. Idle since Phase 2
+    (LocalHttpServer/JarvisAccessibilityService already support it) — this
+    is the first caller, wired up for Phase 3's reasoning layer.
+    """
+    log.info("Action: tap(x=%s, y=%s)", x, y)
+    _audit("tap", f"x={x}, y={y}")
+
+    if not TAP_URL:
+        raise RuntimeError(
+            "No URL configured for 'tap'. Set POCKETJARVIS_TAP_URL in .env "
+            "(e.g. http://127.0.0.1:8765/tap)."
+        )
+    url = f"{TAP_URL}?x={x}&y={y}"
+    _call(url, "tap")
