@@ -1,9 +1,10 @@
 """
-Pocket Jarvis - Phase 3
+Pocket Jarvis - Phase 4
 Telegram long-polling bot that triggers real device actions via actions.py.
-Literal commands (/open, /type) still work as a fast/power-user path.
-Anything else is routed through reasoning.py, which calls the Gemini API
-to turn natural language into a structured action call.
+Literal commands (/open, /type) stay as a fast/power-user path. Anything
+else is handled by run_agent_loop(): a multi-step act-observe loop where
+Gemini sees the actual screen state and decides one action at a time,
+rather than committing to a whole plan up front.
 """
 
 import os
@@ -15,11 +16,19 @@ from dotenv import load_dotenv
 load_dotenv()
 import actions
 import reasoning
+import screen
 
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ALLOWED_USER_ID = os.environ.get("TELEGRAM_USER_ID")
 POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "3"))
+MAX_AGENT_STEPS = int(os.environ.get("MAX_AGENT_STEPS", "10"))
+# Brief pause after each action before re-capturing the screen. This is a
+# known-temporary stand-in for real readiness detection (waiting for the
+# target app's window to actually be foregrounded) — flagged in the
+# project roadmap as something to replace, not something to trust long
+# term. Fine for now since every action we have is fast on a real device.
+STEP_SETTLE_SECONDS = float(os.environ.get("STEP_SETTLE_SECONDS", "1.5"))
 
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -80,10 +89,10 @@ def handle_message(message):
 def dispatch_command(text):
     """
     Literal /open and /type stay as a fast, unambiguous power-user path.
-    Anything else falls through to reasoning.py (Gemini) for natural
-    language parsing. If Gemini's output doesn't parse into a valid,
-    fully-specified action, this fails safely — no action is executed
-    and the user is told rather than guessing.
+    Anything else falls through to run_agent_loop(), the multi-step
+    act-observe loop. Every failure mode along the way (screen capture,
+    reasoning, action execution) fails safely — no action is executed on
+    a bad parse, and the loop stops and reports rather than guessing.
     """
     text = text.strip()
 
@@ -101,40 +110,99 @@ def dispatch_command(text):
 
     if text in ("/help", "/start"):
         return (
-            "Pocket Jarvis (Phase 3)\n\n"
+            "Pocket Jarvis (Phase 4)\n\n"
             "/open <app>   - open an app directly\n"
             "/type <text>  - type into the currently focused field\n"
-            "Anything else - handled via natural language (Gemini)\n"
+            "Anything else - handled via the agent loop (Gemini sees the\n"
+            "                screen and decides one step at a time)\n"
         )
 
-    # Phase 3: route anything non-literal through the reasoning layer.
-    try:
-        result = reasoning.parse_command(text)
-    except reasoning.ReasoningError as e:
-        log.warning("Reasoning failed for %r: %s", text, e)
-        return "🤔 Sorry, I didn't understand that — try a literal /open or /type command."
+    # Phase 4: route anything non-literal through the multi-step
+    # act-observe loop instead of a single one-shot Gemini call.
+    return run_agent_loop(text)
 
-    action, args = result["action"], result["args"]
 
-    if action == "open_app":
-        actions.open_app(args["package"])
-        return f"✅ Opened: {args['package']}"
+def run_agent_loop(goal: str) -> str:
+    """
+    Capture screen -> ask Gemini for one next action -> execute it ->
+    re-capture -> repeat, until Gemini says "done" (goal achieved), "none"
+    (stuck/ambiguous), a step fails outright, or MAX_AGENT_STEPS is hit.
 
-    if action == "type_text":
-        actions.type_text(args["text"])
-        return f"✅ Typed: {args['text']}"
+    Deliberately does NOT try to plan ahead — every decision is made from
+    a fresh, real screen capture, so the loop stays correct even when an
+    app takes a moment to load or a screen looks different than expected.
+    """
+    history = []
 
-    if action == "tap":
-        actions.tap(args["x"], args["y"])
-        return f"✅ Tapped: ({args['x']}, {args['y']})"
+    for step_num in range(1, MAX_AGENT_STEPS + 1):
+        try:
+            current_screen = actions.get_screen_state()
+        except Exception as e:
+            log.exception("Step %s: failed to capture screen", step_num)
+            return f"⚠️ Couldn't read the screen at step {step_num}: {e}"
 
-    # action == "none"
-    return "🤔 Not sure what you meant — try being more specific."
+        try:
+            decision = reasoning.decide_next_step(goal, current_screen, history)
+        except reasoning.ReasoningError as e:
+            log.warning("Step %s: reasoning failed: %s", step_num, e)
+            return "🤔 Got stuck figuring out the next step — try rephrasing the request."
+
+        action, args = decision["action"], decision["args"]
+        log.info("Step %s: %s(%s)", step_num, action, args)
+
+        if action == "done":
+            return f"✅ {args.get('message', 'Done.')}"
+
+        if action == "none":
+            return f"🤔 {args.get('reason', 'Not sure how to proceed from here.')}"
+
+        try:
+            if action == "open_app":
+                actions.open_app(args["package"])
+                history.append({"action": action, "args": args, "result": "ok"})
+
+            elif action == "type_text":
+                actions.type_text(args["text"])
+                history.append({"action": action, "args": args, "result": "ok"})
+
+            elif action == "scroll":
+                actions.scroll(args["direction"])
+                history.append({"action": action, "args": args, "result": "ok"})
+
+            elif action == "tap":
+                target = args["target"]
+                coords = screen.find_target_bounds(current_screen, target)
+                if coords is None:
+                    # Not a hard failure — tell Gemini via history so it
+                    # can try scrolling or a different target next turn,
+                    # rather than aborting the whole task over one miss.
+                    log.warning("Step %s: tap target not found: %r", step_num, target)
+                    history.append(
+                        {
+                            "action": action,
+                            "args": args,
+                            "result": "failed: target not found on screen",
+                        }
+                    )
+                    continue
+                actions.tap(*coords)
+                history.append({"action": action, "args": args, "result": "ok"})
+
+        except Exception as e:
+            log.exception("Step %s: action failed", step_num)
+            return f"⚠️ Action failed at step {step_num} ({action}): {e}"
+
+        time.sleep(STEP_SETTLE_SECONDS)
+
+    return (
+        f"⚠️ Stopped after {MAX_AGENT_STEPS} steps without finishing. "
+        "Try breaking the request into smaller pieces."
+    )
 
 
 def main():
     validate_config()
-    log.info("Pocket Jarvis Phase 3 starting. Polling for messages...")
+    log.info("Pocket Jarvis Phase 4 starting. Polling for messages...")
 
     offset = None
     while True:

@@ -22,6 +22,7 @@ OPEN_APP_URL = os.environ.get("POCKETJARVIS_OPEN_APP_URL")
 TYPE_TEXT_URL = os.environ.get("POCKETJARVIS_TYPE_TEXT_URL")
 TAP_URL = os.environ.get("POCKETJARVIS_TAP_URL")
 SCROLL_URL = os.environ.get("POCKETJARVIS_SCROLL_URL")
+SCREEN_STATE_URL = os.environ.get("POCKETJARVIS_SCREEN_STATE_URL")
 
 AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "logs/audit.log")
 
@@ -125,3 +126,27 @@ def scroll(direction: str):
         )
     url = f"{SCROLL_URL}?direction={direction}"
     _call(url, "scroll")
+
+
+def get_screen_state() -> dict:
+    """
+    Fetch a snapshot of what's currently on screen: a flat list of nodes
+    with text/desc/resourceId/bounds. Unlike the other actions, /screen
+    always returns 200 with a JSON body (even an {"error": ...} one)
+    rather than the OK/"Action failed" text pattern, so this doesn't go
+    through _call() — it parses the JSON directly instead.
+    """
+    log.info("Action: get_screen_state()")
+
+    if not SCREEN_STATE_URL:
+        raise RuntimeError(
+            "No URL configured for 'screen state'. Set "
+            "POCKETJARVIS_SCREEN_STATE_URL in .env "
+            "(e.g. http://127.0.0.1:8765/screen)."
+        )
+    resp = requests.get(SCREEN_STATE_URL, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data:
+        raise RuntimeError(f"Device reported: {data['error']}")
+    return data
