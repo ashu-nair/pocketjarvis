@@ -135,6 +135,15 @@ def get_screen_state() -> dict:
     always returns 200 with a JSON body (even an {"error": ...} one)
     rather than the OK/"Action failed" text pattern, so this doesn't go
     through _call() — it parses the JSON directly instead.
+
+    Every node also gets an "index" attached here. Some genuinely have no
+    text, desc, or resourceId at all (e.g. an icon-only button) — real
+    example found in testing: Play Store's search bar is a wide,
+    unlabeled clickable region, while the notification bell and account
+    avatar right next to it both have full descriptions, so without an
+    index Gemini could only ever "see" and target the two labeled icons,
+    never the actual search bar. The index gives it something to point at
+    even when there's nothing to read.
     """
     log.info("Action: get_screen_state()")
 
@@ -149,4 +158,44 @@ def get_screen_state() -> dict:
     data = resp.json()
     if "error" in data:
         raise RuntimeError(f"Device reported: {data['error']}")
+
+    data["nodes"] = _dedupe_by_bounds(data.get("nodes", []))
+    for i, node in enumerate(data["nodes"]):
+        node["index"] = i
     return data
+
+
+def _dedupe_by_bounds(nodes: list) -> list:
+    """
+    Collapse nodes that share the exact same bounds down to one. Testing
+    showed real duplication of this kind — e.g. Play Store's "Install"
+    label appearing as two separate nodes at identical coordinates, one
+    via its "desc" and one via its "text" — which pads out the node count
+    a model has to precisely scan without adding any real information.
+    Conservative by design: only merges EXACT bounds matches, so nested
+    elements with different (even overlapping) bounds are all preserved.
+    When duplicates exist, keeps whichever has the most identifying info
+    (a non-blank desc, then text, then resourceId), so nothing useful is
+    lost in the merge.
+    """
+    best_by_bounds = {}
+    order = []
+
+    def _richness(node):
+        return (
+            bool(node.get("desc", "").strip()),
+            bool(node.get("text", "").strip()),
+            bool(node.get("resourceId", "").strip()),
+            bool(node.get("clickable")),
+        )
+
+    for node in nodes:
+        bounds = node.get("bounds") or {}
+        key = (bounds.get("left"), bounds.get("top"), bounds.get("right"), bounds.get("bottom"))
+        if key not in best_by_bounds:
+            best_by_bounds[key] = node
+            order.append(key)
+        elif _richness(node) > _richness(best_by_bounds[key]):
+            best_by_bounds[key] = node
+
+    return [best_by_bounds[key] for key in order]

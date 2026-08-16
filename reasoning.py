@@ -165,6 +165,12 @@ instead of the task just failing.
 - Check "history" before repeating yourself: if the same action was just \
 tried and didn't move things forward, don't just try it again — either \
 try something different or use "none" and explain you're stuck.
+- When using "index:N", copy the exact number from a node you can \
+actually see in the current "screen" JSON — don't guess a nearby number \
+if you're not sure (e.g. don't try index:29 then index:30 then index:31 \
+hoping one lands). If you can't confidently identify which index is \
+right, use "scroll" or "none" instead of guessing — a wrong tap is a \
+real action on a real phone.
 - If a previous step in "history" shows result "failed: ...", read why it \
 failed and adjust — e.g. a failed type_text usually means you need to \
 tap the field first; a failed tap usually means the target isn't \
@@ -281,10 +287,19 @@ def _call_gemini(system_prompt: str, user_content: str) -> dict:
 
     try:
         return json.loads(raw_text)
-    except json.JSONDecodeError as e:
-        raise ReasoningError(
-            f"Gemini did not return valid JSON: {raw_text!r}"
-        ) from e
+    except json.JSONDecodeError:
+        # Observed in testing: Gemini occasionally appends one stray extra
+        # "}" despite response_mime_type=json requesting clean JSON. Try
+        # once to repair that specific, narrow case before giving up —
+        # this still requires the repaired text to parse as valid JSON,
+        # so it can't accept genuine garbage, it just recovers a known
+        # cheap mistake instead of wasting the whole turn on it.
+        if raw_text.rstrip().endswith("}}"):
+            try:
+                return json.loads(raw_text.rstrip()[:-1])
+            except json.JSONDecodeError:
+                pass
+        raise ReasoningError(f"Gemini did not return valid JSON: {raw_text!r}")
 
 
 def parse_command(user_text: str) -> dict:
