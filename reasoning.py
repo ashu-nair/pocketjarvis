@@ -88,8 +88,8 @@ never need to plan more than the next single step.
 You will be given:
 1. The owner's original goal (in their own words).
 2. "screen": a JSON snapshot of everything currently visible on screen. \
-Each entry has class, text, desc, resourceId, clickable, editable, and \
-bounds (pixel rectangle).
+Each entry has index, class, text, desc, resourceId, clickable, \
+editable, focused, and bounds (pixel rectangle).
 3. "history": the actions already taken this turn and their results.
 
 Respond with ONLY a JSON object (no markdown, no code fences, no extra \
@@ -99,8 +99,12 @@ Valid actions:
 - {"action": "open_app", "args": {"package": "<friendly app name, e.g. \
 whatsapp, chrome, gmail, youtube, playstore, settings, or a raw Android \
 package name if you're confident>"}}
-- {"action": "tap", "args": {"target": "<copied VERBATIM from a node's \
-text, desc, or resourceId field in the current "screen" JSON>"}}
+- {"action": "tap", "args": {"target": "<EITHER copied VERBATIM from a \
+node's text, desc, or resourceId field, OR "index:N" using that node's \
+index number — use index:N when the element you want has no usable \
+text, desc, or resourceId to quote (e.g. an icon-only button); you can \
+still identify such a node by its class and bounds relative to other \
+nodes even with nothing to read>"}}
 - {"action": "type_text", "args": {"text": "<text to type into whatever \
 is currently focused>"}}
 - {"action": "scroll", "args": {"direction": "up" or "down"}}
@@ -125,14 +129,20 @@ just because a step needs approval.
 Rules:
 - Always return exactly one JSON object, nothing else.
 - Never invent an action outside this list.
-- For "tap": the "target" value MUST be copied verbatim from a node's \
-text, desc, or resourceId field in the current "screen" JSON — never \
-leave it empty and never invent one that isn't present. If the element \
-you want (e.g. an icon-only button with no label) has no usable text, \
-desc, or resourceId to copy, you cannot reliably target it — use \
-"scroll" or "none" instead of guessing or leaving target blank. If what \
-you need isn't visible yet at all, scroll first, then tap on the next \
-turn once it's visible.
+- For "tap": "target" MUST be either copied verbatim from a node's text, \
+desc, or resourceId, OR be "index:N" for that node's index — never leave \
+it empty and never invent a text/desc/resourceId value that isn't \
+present. When an element has no usable text, desc, or resourceId (an \
+icon-only button), use its index instead, reasoning from its class and \
+bounds relative to labeled neighbors — e.g. several equal-width, \
+evenly-spaced unlabeled clickable regions together usually form a \
+navigation bar (a row across the top, or a row across the bottom), and \
+you can often tell which one is likely what you need from its position \
+in that row plus any hint given in the goal itself. Don't assume a \
+fixed layout — different apps put navigation and search in different \
+places (a top bar in one app, a bottom tab in another). If what you \
+need isn't visible on screen at all yet, scroll first, then tap on the \
+next turn once it's visible.
 - "type_text" only works on a field that is CURRENTLY FOCUSED — check \
 the current "screen" JSON for a node with "focused": true before typing. \
 If the field you want to type into is not focused yet (e.g. right after \
