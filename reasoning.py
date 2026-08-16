@@ -110,6 +110,18 @@ ACTUALLY achieved, based on what "screen" shows right now, not before
 - {"action": "none", "args": {"reason": "<why you can't proceed, will be \
 shown to the owner>"}} — use when stuck, ambiguous, or not confident
 
+Any action (open_app, tap, type_text) can ALSO include two extra \
+top-level fields when the action is consequential and hard to undo:
+  "requires_confirmation": true
+  "confirmation_reason": "<one short sentence explaining what this does \
+and why it needs the owner's own judgment, e.g. \"This installs Instagram \
+from the Play Store.\" or \"This sends the typed message to the contact.\">"
+When you set requires_confirmation, the action will NOT run yet — the \
+owner will be asked to approve it first over Telegram, then you'll be \
+called again to continue from there. Use this instead of "none" for \
+consequential actions (see rules below) — don't refuse the task outright \
+just because a step needs approval.
+
 Rules:
 - Always return exactly one JSON object, nothing else.
 - Never invent an action outside this list.
@@ -117,11 +129,32 @@ Rules:
 text or desc field in the current "screen" JSON. Never invent a target \
 that isn't present on screen — if what you need isn't visible yet, \
 scroll first, then tap on the next turn once it's visible.
+- "type_text" only works on a field that is CURRENTLY FOCUSED — check \
+the current "screen" JSON for a node with "focused": true before typing. \
+If the field you want to type into is not focused yet (e.g. right after \
+opening an app, nothing is focused by default), you MUST "tap" that \
+field first and wait for your next turn — never "type_text" in the same \
+turn you intend to focus a field, since it won't be focused until after \
+the tap actually happens.
+- Set requires_confirmation: true on any action that agrees to, \
+activates, pays for, sends, installs, deletes, or otherwise commits to \
+something — e.g. tapping "Accept"/"Agree"/"Allow"/"Sign in"/"Subscribe"/\
+"Buy"/"Pay"/"Install"/"Send"/"Delete"/"Uninstall"/"Confirm order", or \
+typing then sending a message to a real contact. A plain dismiss/skip \
+button (e.g. "Skip", "No thanks", "Not now", "Got it", "Continue", a \
+close/X icon on a promo screen) does NOT need confirmation — it doesn't \
+commit to anything, just proceed normally.
 - Prefer "none" over guessing. A wrong tap or type executes for real on \
-a real phone, right now.
+a real phone, right now — but for anything consequential, prefer \
+requires_confirmation over "none" so the owner gets a real choice \
+instead of the task just failing.
 - Check "history" before repeating yourself: if the same action was just \
 tried and didn't move things forward, don't just try it again — either \
 try something different or use "none" and explain you're stuck.
+- If a previous step in "history" shows result "failed: ...", read why it \
+failed and adjust — e.g. a failed type_text usually means you need to \
+tap the field first; a failed tap usually means the target isn't \
+actually on screen and you may need to scroll.
 """
 
 _VALID_ACTIONS = {
@@ -179,7 +212,21 @@ def _validate_loop_step(parsed: dict) -> dict:
     if action == "tap" and not str(args["target"]).strip():
         raise ReasoningError("tap target was empty")
 
-    return {"action": action, "args": args}
+    requires_confirmation = bool(parsed.get("requires_confirmation", False))
+    confirmation_reason = str(parsed.get("confirmation_reason", "")).strip()
+
+    # "done" and "none" don't execute anything, so confirmation doesn't
+    # apply to them — ignore the flag rather than erroring, in case a
+    # model response sets it inconsistently.
+    if action in ("done", "none"):
+        requires_confirmation = False
+
+    return {
+        "action": action,
+        "args": args,
+        "requires_confirmation": requires_confirmation,
+        "confirmation_reason": confirmation_reason,
+    }
 
 
 def _call_gemini(system_prompt: str, user_content: str) -> dict:
