@@ -100,7 +100,7 @@ Valid actions:
 whatsapp, chrome, gmail, youtube, playstore, settings, or a raw Android \
 package name if you're confident>"}}
 - {"action": "tap", "args": {"target": "<copied VERBATIM from a node's \
-text or desc field in the current "screen" JSON>"}}
+text, desc, or resourceId field in the current "screen" JSON>"}}
 - {"action": "type_text", "args": {"text": "<text to type into whatever \
 is currently focused>"}}
 - {"action": "scroll", "args": {"direction": "up" or "down"}}
@@ -126,9 +126,13 @@ Rules:
 - Always return exactly one JSON object, nothing else.
 - Never invent an action outside this list.
 - For "tap": the "target" value MUST be copied verbatim from a node's \
-text or desc field in the current "screen" JSON. Never invent a target \
-that isn't present on screen — if what you need isn't visible yet, \
-scroll first, then tap on the next turn once it's visible.
+text, desc, or resourceId field in the current "screen" JSON — never \
+leave it empty and never invent one that isn't present. If the element \
+you want (e.g. an icon-only button with no label) has no usable text, \
+desc, or resourceId to copy, you cannot reliably target it — use \
+"scroll" or "none" instead of guessing or leaving target blank. If what \
+you need isn't visible yet at all, scroll first, then tap on the next \
+turn once it's visible.
 - "type_text" only works on a field that is CURRENTLY FOCUSED — check \
 the current "screen" JSON for a node with "focused": true before typing. \
 If the field you want to type into is not focused yet (e.g. right after \
@@ -155,6 +159,10 @@ try something different or use "none" and explain you're stuck.
 failed and adjust — e.g. a failed type_text usually means you need to \
 tap the field first; a failed tap usually means the target isn't \
 actually on screen and you may need to scroll.
+- Keep "reason" (for "none") and "message" (for "done") to ONE short, \
+plain sentence for the owner. Never include your own working-through-it \
+narration — no "let's check", "wait", "hmm", or similar. Decide first, \
+then state only the clean conclusion.
 """
 
 _VALID_ACTIONS = {

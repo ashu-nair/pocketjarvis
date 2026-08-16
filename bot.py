@@ -207,8 +207,20 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
         try:
             decision = reasoning.decide_next_step(goal, current_screen, history)
         except reasoning.ReasoningError as e:
+            # Recoverable, not fatal: a single malformed decision (e.g. an
+            # empty tap target) shouldn't throw away everything the loop
+            # already accomplished this turn (like having opened an app).
+            # Record it and let the loop try again on a fresh decision,
+            # same as any other failed step — still bounded by the
+            # for-loop's step budget, so a persistently broken Gemini
+            # response can't loop forever, it just eventually falls
+            # through to the "stopped after N steps" message below.
             log.warning("Reasoning failed: %s", e)
-            return "🤔 Got stuck figuring out the next step — try rephrasing the request."
+            history.append(
+                {"action": "invalid_decision", "args": {}, "result": f"failed: {e}"}
+            )
+            time.sleep(STEP_SETTLE_SECONDS)
+            continue
 
         action, args = decision["action"], decision["args"]
         log.info("Decision: %s(%s)", action, args)
