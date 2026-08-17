@@ -14,6 +14,19 @@ Design contract:
 
 Kept as a plain requests-based REST call (no google-generativeai SDK) to
 match the project's existing "no extra dependency" style.
+
+--- Vision fallback (added for Known Issues #1) -----------------------
+decide_next_step() (tree-based) is the default path for every turn of the
+act-observe loop. When screen.find_target_bounds() can't resolve a tap
+target — usually an unlabeled icon (Play Store's search bar) or a UI that
+changed since it was last mapped (Skyscanner) — the caller falls back to
+decide_next_step_vision(), which sends an actual screenshot instead of the
+accessibility tree and asks Gemini to point at pixel coordinates directly.
+Both paths share the same action schema and confirmation-gate behavior;
+only the input Gemini sees (tree vs image) and the tap arg shape differ
+along the way, and decide_next_step_vision() normalizes tap args back to
+{"target": ...}-free real x,y before returning, so bot.py's execution code
+doesn't need two different tap-handling branches.
 """
 
 import json
@@ -181,6 +194,59 @@ narration — no "let's check", "wait", "hmm", or similar. Decide first, \
 then state only the clean conclusion.
 """
 
+# --- Vision fallback contract -------------------------------------------
+#
+# Called instead of decide_next_step() when screen.find_target_bounds()
+# returns None for a tap target — i.e. the tree-based reasoning named a
+# target that couldn't be resolved to real coordinates, usually because
+# the element has no usable text/desc/resourceId (unlabeled icon) or the
+# app's UI changed since it was last seen. Sends an actual screenshot
+# instead of the accessibility tree and asks Gemini to point at pixel
+# coordinates directly, which sidesteps the tree-matching problem
+# entirely rather than trying to prompt-engineer around it further (see
+# Known Issues #1 — this was tried extensively and hit a real ceiling).
+
+SYSTEM_PROMPT_VISION = """You are the reasoning layer for Pocket Jarvis, a \
+personal Android automation agent controlled via Telegram by its owner. \
+You are being called as a FALLBACK: the accessibility-tree-based reasoning \
+couldn't find a reliable text/desc/resourceId match for the next tap \
+(usually an unlabeled icon, or a UI that changed since the app was last \
+mapped). You will be shown an actual screenshot instead.
+
+You will be given:
+1. The owner's original goal.
+2. An image: the current screen, {width}x{height} pixels.
+3. "history": actions already taken this turn and their results.
+
+Respond with ONLY a JSON object (no markdown, no extra text) describing \
+exactly ONE next action.
+
+Valid actions:
+- {"action": "tap", "args": {"x": <int 0-{width}>, "y": <int 0-{height}>}} \
+— coordinates in the SAME pixel space as the image you were shown
+- {"action": "open_app", "args": {"package": "<friendly app name>"}}
+- {"action": "type_text", "args": {"text": "<text to type>"}}
+- {"action": "scroll", "args": {"direction": "up" or "down"}}
+- {"action": "done", "args": {"message": "<short summary for the owner>"}}
+- {"action": "none", "args": {"reason": "<why you can't proceed>"}}
+
+Any action can also include:
+  "requires_confirmation": true
+  "confirmation_reason": "<one short sentence>"
+Use this for anything consequential (agrees/pays/sends/installs/deletes/\
+confirms), same as the normal reasoning layer.
+
+Rules:
+- For "tap": pick the pixel center of the element you actually see in \
+the image. Look carefully — this is being called specifically because \
+the element has no label, so read it visually (icon shape, position, \
+nearby text) rather than guessing.
+- If you can't confidently identify the element visually either, use \
+"none" rather than guessing — a wrong tap is a real action on a real \
+phone.
+- Keep "reason"/"message" to one short plain sentence, no narration.
+"""
+
 _VALID_ACTIONS = {
     "open_app": {"package"},
     "type_text": {"text"},
@@ -192,6 +258,15 @@ _VALID_LOOP_ACTIONS = {
     "open_app": {"package"},
     "type_text": {"text"},
     "tap": {"target"},
+    "scroll": {"direction"},
+    "done": set(),
+    "none": set(),
+}
+
+_VALID_VISION_ACTIONS = {
+    "open_app": {"package"},
+    "type_text": {"text"},
+    "tap": {"x", "y"},
     "scroll": {"direction"},
     "done": set(),
     "none": set(),
@@ -210,6 +285,38 @@ def decide_next_step(goal: str, screen_state: dict, history: list) -> dict:
     )
     parsed = _call_gemini(SYSTEM_PROMPT_LOOP, user_content)
     return _validate_loop_step(parsed)
+
+
+def decide_next_step_vision(goal: str, screenshot: dict, history: list) -> dict:
+    """
+    Vision fallback for one turn of the act-observe loop. `screenshot` is
+    the dict returned by actions.get_screenshot() (image/mimeType/width/
+    height/deviceWidth/deviceHeight). Tap coordinates are rescaled from
+    the downscaled image's pixel space back to real device pixels before
+    returning, so callers can pass the returned args straight into
+    actions.tap() exactly like the tree-based path — no extra
+    coordinate math needed at the call site.
+
+    Raises ReasoningError on any failure, same contract as
+    decide_next_step().
+    """
+    img_w = screenshot["width"]
+    img_h = screenshot["height"]
+    prompt = SYSTEM_PROMPT_VISION.format(width=img_w, height=img_h)
+
+    user_text = json.dumps({"goal": goal, "history": history})
+    parsed = _call_gemini_vision(
+        prompt, user_text, screenshot["image"], screenshot.get("mimeType", "image/jpeg")
+    )
+    step = _validate_vision_step(parsed, img_w, img_h)
+
+    if step["action"] == "tap":
+        scale_x = screenshot["deviceWidth"] / img_w
+        scale_y = screenshot["deviceHeight"] / img_h
+        step["args"]["x"] = int(step["args"]["x"] * scale_x)
+        step["args"]["y"] = int(step["args"]["y"] * scale_y)
+
+    return step
 
 
 def _validate_loop_step(parsed: dict) -> dict:
@@ -242,6 +349,48 @@ def _validate_loop_step(parsed: dict) -> dict:
     # "done" and "none" don't execute anything, so confirmation doesn't
     # apply to them — ignore the flag rather than erroring, in case a
     # model response sets it inconsistently.
+    if action in ("done", "none"):
+        requires_confirmation = False
+
+    return {
+        "action": action,
+        "args": args,
+        "requires_confirmation": requires_confirmation,
+        "confirmation_reason": confirmation_reason,
+    }
+
+
+def _validate_vision_step(parsed: dict, img_w: int, img_h: int) -> dict:
+    if not isinstance(parsed, dict):
+        raise ReasoningError(f"Gemini vision response was not a JSON object: {parsed!r}")
+
+    action = parsed.get("action")
+    args = parsed.get("args", {})
+
+    if action not in _VALID_VISION_ACTIONS:
+        raise ReasoningError(f"Unknown vision action from Gemini: {action!r}")
+    if not isinstance(args, dict):
+        raise ReasoningError(f"'args' was not an object: {args!r}")
+
+    required = _VALID_VISION_ACTIONS[action]
+    missing = required - set(args.keys())
+    if missing:
+        raise ReasoningError(f"Missing args {missing} for vision action {action!r}")
+
+    if action == "tap":
+        try:
+            x, y = int(args["x"]), int(args["y"])
+        except (TypeError, ValueError) as e:
+            raise ReasoningError(f"tap args not valid integers: {args}") from e
+        if not (0 <= x <= img_w and 0 <= y <= img_h):
+            raise ReasoningError(f"tap coordinates out of image bounds: {args}")
+        args["x"], args["y"] = x, y
+
+    if action == "scroll" and args["direction"] not in ("up", "down"):
+        raise ReasoningError(f"Invalid scroll direction: {args['direction']!r}")
+
+    requires_confirmation = bool(parsed.get("requires_confirmation", False))
+    confirmation_reason = str(parsed.get("confirmation_reason", "")).strip()
     if action in ("done", "none"):
         requires_confirmation = False
 
@@ -300,6 +449,58 @@ def _call_gemini(system_prompt: str, user_content: str) -> dict:
             except json.JSONDecodeError:
                 pass
         raise ReasoningError(f"Gemini did not return valid JSON: {raw_text!r}")
+
+
+def _call_gemini_vision(system_prompt: str, user_text: str, image_b64: str, mime_type: str) -> dict:
+    """Same contract as _call_gemini(), but attaches an inline image part
+    to the request alongside the text content. Kept separate from
+    _call_gemini() rather than adding an optional image param there, so
+    the plain text-only path (used by parse_command and decide_next_step)
+    can't accidentally regress if this path changes."""
+    if not GEMINI_API_KEY:
+        raise ReasoningError("GEMINI_API_KEY not set in .env")
+
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": user_text},
+                {"inline_data": {"mime_type": mime_type, "data": image_b64}},
+            ],
+        }],
+        "generationConfig": {
+            "temperature": 0,
+            "response_mime_type": "application/json",
+        },
+    }
+
+    try:
+        resp = requests.post(
+            GEMINI_URL,
+            params={"key": GEMINI_API_KEY},
+            json=payload,
+            timeout=20,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise ReasoningError(f"Gemini vision API request failed: {e}") from e
+
+    try:
+        data = resp.json()
+        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, ValueError) as e:
+        raise ReasoningError(f"Unexpected Gemini vision response shape: {e}") from e
+
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        if raw_text.rstrip().endswith("}}"):
+            try:
+                return json.loads(raw_text.rstrip()[:-1])
+            except json.JSONDecodeError:
+                pass
+        raise ReasoningError(f"Gemini vision did not return valid JSON: {raw_text!r}")
 
 
 def parse_command(user_text: str) -> dict:

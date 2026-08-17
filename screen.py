@@ -3,6 +3,12 @@ screen.py — turns a screen-state snapshot (from actions.get_screen_state())
 into something usable for tapping. Kept separate from reasoning.py (which
 only knows how to talk to Gemini) and actions.py (which only knows how to
 send device commands) — this module's only job is interpreting screen JSON.
+
+No changes needed for the vision fallback: find_target_bounds() returning
+None IS the fallback trigger. The caller (bot.py's continue_agent_loop)
+checks for that None and switches to reasoning.decide_next_step_vision()
++ actions.get_screenshot() instead of calling actions.tap() with a
+resolved (x, y) here.
 """
 
 

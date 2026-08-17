@@ -23,6 +23,7 @@ TYPE_TEXT_URL = os.environ.get("POCKETJARVIS_TYPE_TEXT_URL")
 TAP_URL = os.environ.get("POCKETJARVIS_TAP_URL")
 SCROLL_URL = os.environ.get("POCKETJARVIS_SCROLL_URL")
 SCREEN_STATE_URL = os.environ.get("POCKETJARVIS_SCREEN_STATE_URL")
+SCREENSHOT_URL = os.environ.get("POCKETJARVIS_SCREENSHOT_URL")
 
 AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "logs/audit.log")
 
@@ -98,9 +99,10 @@ def type_text(text: str):
 
 def tap(x: int, y: int):
     """
-    Tell the phone to tap a specific screen coordinate. Idle since Phase 2
-    (LocalHttpServer/JarvisAccessibilityService already support it) — this
-    is the first caller, wired up for Phase 3's reasoning layer.
+    Tell the phone to tap a specific screen coordinate. Used both by the
+    tree-based reasoning path (coordinates resolved via screen.py) and the
+    vision fallback path (coordinates returned directly by Gemini, already
+    rescaled to real device pixels by reasoning.decide_next_step_vision).
     """
     log.info("Action: tap(x=%s, y=%s)", x, y)
     _audit("tap", f"x={x}, y={y}")
@@ -162,6 +164,42 @@ def get_screen_state() -> dict:
     data["nodes"] = _dedupe_by_bounds(data.get("nodes", []))
     for i, node in enumerate(data["nodes"]):
         node["index"] = i
+    return data
+
+
+def get_screenshot() -> dict:
+    """
+    Fetch a downscaled screenshot for the vision fallback path (see
+    Known Issues #1 — unlabeled/changed UI the accessibility tree can't
+    describe well). Like /screen, /screenshot always returns 200 with a
+    JSON body (even an {"error": ...} one), so this parses the JSON
+    directly rather than going through _call().
+
+    Returns the raw dict from the device:
+        image        - base64-encoded JPEG
+        mimeType     - "image/jpeg"
+        width/height - dimensions of the *scaled* image actually sent to
+                        Gemini (max 1024px long edge)
+        deviceWidth/deviceHeight - real, unscaled screen pixels
+
+    reasoning.decide_next_step_vision() uses deviceWidth/deviceHeight to
+    rescale any coordinates Gemini returns back to real device pixels
+    before they're passed to actions.tap() — callers of this function
+    don't need to do that math themselves.
+    """
+    log.info("Action: get_screenshot()")
+
+    if not SCREENSHOT_URL:
+        raise RuntimeError(
+            "No URL configured for 'screenshot'. Set "
+            "POCKETJARVIS_SCREENSHOT_URL in .env "
+            "(e.g. http://127.0.0.1:8765/screenshot)."
+        )
+    resp = requests.get(SCREENSHOT_URL, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    if "error" in data:
+        raise RuntimeError(f"Device reported: {data['error']}")
     return data
 
 

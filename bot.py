@@ -7,6 +7,17 @@ Gemini sees the actual screen state and decides one action at a time,
 pausing to ask for explicit confirmation before anything consequential
 (installing, sending, buying, agreeing to something) rather than acting
 on its own judgment.
+
+--- Vision fallback (Known Issues #1) -----------------------------------
+When the tree-based decision names a tap "target" that
+screen.find_target_bounds() can't resolve to real coordinates — usually
+an unlabeled icon (Play Store's search bar) or a UI that changed since it
+was last mapped (Skyscanner) — continue_agent_loop falls back to a real
+screenshot + reasoning.decide_next_step_vision() instead of failing the
+step outright. The vision decision replaces the tree decision for that
+turn and flows through the exact same confirmation-gate and execution
+code below it, since both paths return the same
+{action, args, requires_confirmation, confirmation_reason} shape.
 """
 
 import os
@@ -240,17 +251,58 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
             # pause-for-confirmation paths below use the same coordinates.
             target = args["target"]
             coords = screen.find_target_bounds(current_screen, target)
+
             if coords is None:
-                log.warning("Tap target not found: %r", target)
-                history.append(
-                    {
-                        "action": action,
-                        "args": args,
-                        "result": "failed: target not found on screen",
-                    }
+                # Tree-based matching failed — usually an unlabeled icon
+                # (no text/desc/resourceId to match on) or a UI that
+                # changed since last mapped. Fall back to a real
+                # screenshot + vision-based reasoning instead of just
+                # failing the step. This REPLACES the tree decision for
+                # this turn: decision/action/args below all become the
+                # vision call's output, which shares the exact same
+                # {action, args, requires_confirmation,
+                # confirmation_reason} shape as the tree path, so the
+                # confirmation-gate and execution code further down
+                # doesn't need to know which path produced it.
+                log.warning(
+                    "Tap target not found via tree: %r — trying vision fallback", target
                 )
-                continue
-            args = {**args, "x": coords[0], "y": coords[1]}
+                try:
+                    screenshot = actions.get_screenshot()
+                    decision = reasoning.decide_next_step_vision(goal, screenshot, history)
+                except (RuntimeError, reasoning.ReasoningError) as e:
+                    log.warning("Vision fallback failed: %s", e)
+                    history.append(
+                        {
+                            "action": action,
+                            "args": args,
+                            "result": (
+                                "failed: target not found on screen; "
+                                f"vision fallback also failed: {e}"
+                            ),
+                        }
+                    )
+                    time.sleep(STEP_SETTLE_SECONDS)
+                    continue
+
+                action, args = decision["action"], decision["args"]
+                log.info("Vision decision: %s(%s)", action, args)
+
+                if action == "done":
+                    return f"✅ {args.get('message', 'Done.')}"
+
+                if action == "none":
+                    return f"🤔 {args.get('reason', 'Not sure how to proceed from here.')}"
+
+                # If vision also decided "tap", args["x"]/args["y"] are
+                # already real device pixel coordinates — rescaled inside
+                # reasoning.decide_next_step_vision() from the downscaled
+                # screenshot's coordinate space, so no further resolution
+                # is needed here. Any other action (open_app, type_text,
+                # scroll) needs no resolution at all and falls straight
+                # through to the confirmation/execution code below.
+            else:
+                args = {**args, "x": coords[0], "y": coords[1]}
 
         if decision["requires_confirmation"]:
             reason = decision["confirmation_reason"] or f"{action}({args})"
@@ -299,9 +351,9 @@ def _execute_action(action: str, args: dict) -> tuple:
 
         if action == "tap":
             # x/y are always pre-resolved by continue_agent_loop before
-            # this is called (both for immediate execution and for a
-            # resumed, approved confirmation) — this function only ever
-            # sends real coordinates to the device, never a target string.
+            # this is called (tree match, vision fallback, or a resumed
+            # approved confirmation) — this function only ever sends real
+            # coordinates to the device, never a target string.
             if "x" in args and "y" in args:
                 actions.tap(args["x"], args["y"])
                 return True, "ok"
