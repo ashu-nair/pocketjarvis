@@ -215,15 +215,17 @@ mapped). You will be shown an actual screenshot instead.
 
 You will be given:
 1. The owner's original goal.
-2. An image: the current screen, {width}x{height} pixels.
+2. An image: the current screen.
 3. "history": actions already taken this turn and their results.
 
 Respond with ONLY a JSON object (no markdown, no extra text) describing \
 exactly ONE next action.
 
 Valid actions:
-- {"action": "tap", "args": {"x": <int 0-{width}>, "y": <int 0-{height}>}} \
-— coordinates in the SAME pixel space as the image you were shown
+- {"action": "tap", "args": {"x": <int 0-1000>, "y": <int 0-1000>}} — \
+coordinates NORMALIZED to a 0-1000 scale, where x=0 is the left edge of \
+the image, x=1000 is the right edge, y=0 is the top edge, y=1000 is the \
+bottom edge — regardless of the image's actual pixel dimensions
 - {"action": "open_app", "args": {"package": "<friendly app name>"}}
 - {"action": "type_text", "args": {"text": "<text to type>"}}
 - {"action": "scroll", "args": {"direction": "up" or "down"}}
@@ -237,10 +239,11 @@ Use this for anything consequential (agrees/pays/sends/installs/deletes/\
 confirms), same as the normal reasoning layer.
 
 Rules:
-- For "tap": pick the pixel center of the element you actually see in \
-the image. Look carefully — this is being called specifically because \
-the element has no label, so read it visually (icon shape, position, \
-nearby text) rather than guessing.
+- For "tap": pick the normalized (0-1000, 0-1000) position of the \
+CENTER of the element you actually see in the image. Look carefully — \
+this is being called specifically because the element has no label, so \
+read it visually (icon shape, position, nearby text) rather than \
+guessing.
 - If you can't confidently identify the element visually either, use \
 "none" rather than guessing — a wrong tap is a real action on a real \
 phone.
@@ -302,25 +305,28 @@ def decide_next_step_vision(goal: str, screenshot: dict, history: list) -> dict:
     """
     img_w = screenshot["width"]
     img_h = screenshot["height"]
-    # NOTE: deliberately NOT using str.format() here — SYSTEM_PROMPT_VISION
-    # contains literal JSON examples full of {"action": ...} braces, and
-    # .format() treats every one of those as a placeholder to fill in, not
-    # just the {width}/{height} markers. Targeted .replace() sidesteps
-    # that entirely since the JSON examples don't contain the literal
-    # substrings "{width}" or "{height}".
-    prompt = SYSTEM_PROMPT_VISION.replace("{width}", str(img_w)).replace("{height}", str(img_h))
+    prompt = SYSTEM_PROMPT_VISION
 
     user_text = json.dumps({"goal": goal, "history": history})
     parsed = _call_gemini_vision(
         prompt, user_text, screenshot["image"], screenshot.get("mimeType", "image/jpeg")
     )
-    step = _validate_vision_step(parsed, img_w, img_h)
+    step = _validate_vision_step(parsed)
 
     if step["action"] == "tap":
-        scale_x = screenshot["deviceWidth"] / img_w
-        scale_y = screenshot["deviceHeight"] / img_h
-        step["args"]["x"] = int(step["args"]["x"] * scale_x)
-        step["args"]["y"] = int(step["args"]["y"] * scale_y)
+        # Gemini's vision output uses a normalized 0-1000 coordinate space
+        # by convention (trained behavior for pointing/bbox tasks) rather
+        # than following arbitrary pixel-range instructions in the prompt
+        # — confirmed via testing, where returned coordinates like
+        # {'x': 500, 'y': 900} were consistently out of the actual scaled
+        # image's pixel bounds but made sense as 0-1000 normalized values.
+        # Rescale directly against the real device dimensions; the scaled
+        # screenshot's own width/height aren't needed for this step at
+        # all now.
+        device_w = screenshot["deviceWidth"]
+        device_h = screenshot["deviceHeight"]
+        step["args"]["x"] = int(step["args"]["x"] / 1000 * device_w)
+        step["args"]["y"] = int(step["args"]["y"] / 1000 * device_h)
 
     return step
 
@@ -366,7 +372,7 @@ def _validate_loop_step(parsed: dict) -> dict:
     }
 
 
-def _validate_vision_step(parsed: dict, img_w: int, img_h: int) -> dict:
+def _validate_vision_step(parsed: dict) -> dict:
     if not isinstance(parsed, dict):
         raise ReasoningError(f"Gemini vision response was not a JSON object: {parsed!r}")
 
@@ -388,8 +394,8 @@ def _validate_vision_step(parsed: dict, img_w: int, img_h: int) -> dict:
             x, y = int(args["x"]), int(args["y"])
         except (TypeError, ValueError) as e:
             raise ReasoningError(f"tap args not valid integers: {args}") from e
-        if not (0 <= x <= img_w and 0 <= y <= img_h):
-            raise ReasoningError(f"tap coordinates out of image bounds: {args}")
+        if not (0 <= x <= 1000 and 0 <= y <= 1000):
+            raise ReasoningError(f"tap coordinates out of normalized 0-1000 bounds: {args}")
         args["x"], args["y"] = x, y
 
     if action == "scroll" and args["direction"] not in ("up", "down"):
@@ -486,7 +492,7 @@ def _call_gemini_vision(system_prompt: str, user_text: str, image_b64: str, mime
             GEMINI_URL,
             params={"key": GEMINI_API_KEY},
             json=payload,
-            timeout=20,
+            timeout=30,
         )
         resp.raise_for_status()
     except requests.RequestException as e:
