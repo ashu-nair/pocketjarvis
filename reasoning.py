@@ -302,7 +302,13 @@ def decide_next_step_vision(goal: str, screenshot: dict, history: list) -> dict:
     """
     img_w = screenshot["width"]
     img_h = screenshot["height"]
-    prompt = SYSTEM_PROMPT_VISION.format(width=img_w, height=img_h)
+    # NOTE: deliberately NOT using str.format() here — SYSTEM_PROMPT_VISION
+    # contains literal JSON examples full of {"action": ...} braces, and
+    # .format() treats every one of those as a placeholder to fill in, not
+    # just the {width}/{height} markers. Targeted .replace() sidesteps
+    # that entirely since the JSON examples don't contain the literal
+    # substrings "{width}" or "{height}".
+    prompt = SYSTEM_PROMPT_VISION.replace("{width}", str(img_w)).replace("{height}", str(img_h))
 
     user_text = json.dumps({"goal": goal, "history": history})
     parsed = _call_gemini_vision(
