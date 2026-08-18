@@ -309,14 +309,42 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
             coords = screen.find_target_bounds(current_screen, target)
 
             if coords is None:
-                # Tree-based matching failed — usually an unlabeled icon
-                # (no text/desc/resourceId to match on) or a UI that
-                # changed since last mapped. Fall back to a real
-                # screenshot + vision-based reasoning instead of just
-                # failing the step. This REPLACES the tree decision for
-                # this turn: decision/action/args below all become the
-                # vision call's output, which shares the exact same
-                # {action, args, requires_confirmation,
+                # Before falling back to vision, retry the tree match once
+                # with extra settle time. Confirmed via a real /screen
+                # capture during testing: a target like "Install" can be
+                # genuinely present in the tree with an exact text match —
+                # it just wasn't rendered yet at the original capture time
+                # (e.g. an animated bottom sheet still settling), and
+                # STEP_SETTLE_SECONDS wasn't long enough to catch it. A
+                # cheap retry resolves that timing case via the tree
+                # (fast, exact) instead of falling through to vision,
+                # which is both slower and — also confirmed via testing —
+                # meaningfully less precise (observed landing ~100px off
+                # a real button's position).
+                log.info(
+                    "Tap target %r not found on first try — retrying tree "
+                    "match after extra settle time before vision fallback",
+                    target,
+                )
+                time.sleep(1.5)
+                try:
+                    retry_screen = actions.get_screen_state()
+                    coords = screen.find_target_bounds(retry_screen, target)
+                except Exception as e:
+                    log.warning("Retry screen capture failed: %s", e)
+                    coords = None
+                if coords is not None:
+                    current_screen = retry_screen
+
+            if coords is None:
+                # Tree still doesn't have it after the retry — a genuine
+                # vision fallback case (e.g. a truly unlabeled icon the
+                # tree can never describe), not just a timing issue. Fall
+                # back to a real screenshot + vision-based reasoning
+                # instead of just failing the step. This REPLACES the
+                # tree decision for this turn: decision/action/args below
+                # all become the vision call's output, which shares the
+                # exact same {action, args, requires_confirmation,
                 # confirmation_reason} shape as the tree path, so the
                 # confirmation-gate and execution code further down
                 # doesn't need to know which path produced it.
