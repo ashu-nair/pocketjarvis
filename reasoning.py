@@ -244,6 +244,24 @@ CENTER of the element you actually see in the image. Look carefully — \
 this is being called specifically because the element has no label, so \
 read it visually (icon shape, position, nearby text) rather than \
 guessing.
+- Before proposing a tap that installs, buys, or otherwise commits to a \
+specific app or item named in the goal (e.g. "install BGMI"), you MUST \
+be able to see that exact app's name or clearly identifiable icon/\
+branding somewhere in the image first. Do NOT assume any visible \
+"Install"/"Buy"/"Get" button satisfies the goal just because it exists \
+— a screen can show unrelated apps, recommendations, or ads with their \
+own buttons that have nothing to do with what the owner asked for. If \
+you don't see the target app's name or icon anywhere in the image, do \
+NOT tap an unrelated button — instead work toward finding it (e.g. tap \
+a visible search icon/bar) or use "none" if you're not sure how.
+- Sponsored or ad content (labeled "Sponsored"/"Ad", or presented as a \
+promoted card) never satisfies the goal unless the owner's goal \
+explicitly names that exact product or service.
+- When you do propose a consequential tap, "confirmation_reason" must \
+name the SPECIFIC app/item text you can actually read in the image, not \
+just repeat the goal's wording back. If you can't read enough on-screen \
+text to name it specifically, that itself is a sign you may be \
+targeting the wrong element — reconsider before proposing the tap.
 - If you can't confidently identify the element visually either, use \
 "none" rather than guessing — a wrong tap is a real action on a real \
 phone.

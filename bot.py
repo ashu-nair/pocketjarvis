@@ -206,7 +206,20 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
             log.warning("Approved action failed: %s", result)
         time.sleep(STEP_SETTLE_SECONDS)
 
-    remaining = max(MAX_AGENT_STEPS - len(history), 1)
+    remaining = MAX_AGENT_STEPS - len(history)
+    if remaining <= 0:
+        # Total steps across this whole session (including earlier
+        # confirmation rounds) has hit the cap. Stop here rather than
+        # continuing to pause-and-resume indefinitely — without this
+        # check, a task that keeps needing confirmation (e.g. because a
+        # tap isn't actually landing where intended and the same dialog
+        # keeps reappearing) could ask for approval forever, since each
+        # resumed call would otherwise still attempt "at least 1" more
+        # step no matter how large history had already grown.
+        return (
+            f"⚠️ Stopped after {MAX_AGENT_STEPS} steps without finishing. "
+            "Try breaking the request into smaller pieces."
+        )
 
     for _ in range(remaining):
         try:
