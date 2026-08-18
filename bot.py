@@ -66,8 +66,51 @@ _AFFIRMATIVE_REPLIES = {
 }
 
 
+_TAP_REPEAT_TOLERANCE_PX = 25
+_TAP_REPEAT_THRESHOLD = 2  # this many consecutive near-identical taps triggers a stop
+
+
+def _is_stuck_repeating_tap(x: int, y: int, history: list) -> bool:
+    """
+    Returns True if the last _TAP_REPEAT_THRESHOLD executed tap actions
+    in history all landed within _TAP_REPEAT_TOLERANCE_PX pixels of the
+    newly proposed (x, y). Gemini's system prompt already instructs it to
+    check history and not repeat a dead action, but this isn't reliably
+    followed in practice — observed directly in testing, where a
+    content-rating dialog's OK button was tapped ~8 times in a row at
+    near-identical coordinates with no progress, each time proposed as a
+    nominally "different" tree target (index:4, index:2, index:4...) that
+    the vision fallback resolved to essentially the same pixel every
+    time. Enforcing this in code rather than trusting the model to
+    self-regulate stops a runaway loop — and the repeated confirmation
+    prompts that come with it — automatically instead of relying on the
+    owner to notice and kill the process.
+    """
+    recent_taps = [
+        h for h in history[-_TAP_REPEAT_THRESHOLD:]
+        if h.get("action") == "tap" and "x" in h.get("args", {}) and "y" in h.get("args", {})
+    ]
+    if len(recent_taps) < _TAP_REPEAT_THRESHOLD:
+        return False
+    return all(
+        abs(h["args"]["x"] - x) <= _TAP_REPEAT_TOLERANCE_PX
+        and abs(h["args"]["y"] - y) <= _TAP_REPEAT_TOLERANCE_PX
+        for h in recent_taps
+    )
+
+
 def is_affirmative(text: str) -> bool:
-    return text.strip().lower() in _AFFIRMATIVE_REPLIES
+    cleaned = text.strip().lower().rstrip("!.?")
+    if cleaned in _AFFIRMATIVE_REPLIES:
+        return True
+    # Tolerate simple elongated typos like "yess"/"yesss" — bounded to a
+    # short length so this can't accidentally match a longer, unrelated
+    # sentence that merely starts with "yes". Stays conservative: this
+    # does NOT add new words to the affirmative set, just forgives minor
+    # typing slips on the existing ones most likely to occur ("yes").
+    if cleaned.startswith("yes") and len(cleaned) <= 6:
+        return True
+    return False
 
 
 def validate_config():
@@ -316,6 +359,24 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
                 # through to the confirmation/execution code below.
             else:
                 args = {**args, "x": coords[0], "y": coords[1]}
+
+        if action == "tap" and _is_stuck_repeating_tap(args["x"], args["y"], history):
+            log.warning(
+                "Detected repeated tap at (%s, %s) with no progress — stopping instead of looping",
+                args["x"], args["y"],
+            )
+            history.append(
+                {
+                    "action": action,
+                    "args": args,
+                    "result": "skipped: repeated tap at same location without progress — stopped to avoid a loop",
+                }
+            )
+            return (
+                "🤔 I tapped the same spot a couple of times without anything changing, "
+                "so I stopped instead of repeating it further. Worth checking the screen "
+                "manually — a dialog may need a different response than expected."
+            )
 
         if decision["requires_confirmation"]:
             reason = decision["confirmation_reason"] or f"{action}({args})"
