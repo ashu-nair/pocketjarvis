@@ -28,7 +28,33 @@ def find_target_bounds(screen_state: dict, target: str):
     and resourceId is the only thing Gemini can actually name them by.
     """
     nodes = screen_state.get("nodes", [])
-    target_lower = target.strip().lower()
+    target_stripped = target.strip()
+    if not target_stripped:
+        return None
+
+    # Handle "index:N" targeting explicitly. reasoning.py's system prompt
+    # tells Gemini it can use "index:N" for elements with no usable
+    # text/desc/resourceId (see actions.get_screen_state's docstring on
+    # why the index field exists) — but this lookup was never actually
+    # implemented here. Every "index:N" target was silently falling
+    # through to the text/desc/resourceId matching below, which can never
+    # match a literal string like "index:8" against real element text, so
+    # every index-based tap unconditionally failed tree resolution and
+    # went straight to the (slower, less precise) vision fallback — even
+    # when the intended node was sitting right there in the tree the
+    # whole time with a perfectly good bounds box.
+    if target_stripped.lower().startswith("index:"):
+        idx_str = target_stripped.split(":", 1)[1].strip()
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            return None
+        for node in nodes:
+            if node.get("index") == idx:
+                return _center(node.get("bounds"))
+        return None
+
+    target_lower = target_stripped.lower()
     if not target_lower:
         return None
 
