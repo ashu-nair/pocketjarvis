@@ -170,6 +170,15 @@ wrong one silently. When you can see multiple candidates like this, \
 either use "index:N" for the SPECIFIC one you mean (never a generic \
 text match), or confirm from context (visible month/year label, \
 position in the grid) which one is actually correct before choosing.
+- When the goal is a general category task (e.g. "find cheap flights", \
+"order groceries") and the owner did NOT name a specific site, app, or \
+service, you are not tied to any particular one — pick whichever \
+well-known option seems easiest to navigate for the goal. If "history" \
+shows you've spent several turns on one site without real progress \
+(e.g. stuck on a hard-to-use calendar or search widget), don't keep \
+forcing that same site — go back (or open a new tab/search) and try a \
+different well-known site that serves the same purpose instead. Only \
+stick to one specific site throughout if the owner actually named it.
 - "type_text" only works on a field that is CURRENTLY FOCUSED — check \
 the current "screen" JSON for a node with "focused": true before typing. \
 If the field you want to type into is not focused yet (e.g. right after \
