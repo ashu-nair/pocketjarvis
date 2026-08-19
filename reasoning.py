@@ -120,7 +120,12 @@ still identify such a node by its class and bounds relative to other \
 nodes even with nothing to read>"}}
 - {"action": "type_text", "args": {"text": "<text to type into whatever \
 is currently focused>"}}
-- {"action": "scroll", "args": {"direction": "up" or "down"}}
+- {"action": "scroll", "args": {"direction": "up", "down", "left", or \
+"right"}} — "up"/"down" for vertical scrolling (lists, feeds, long \
+pages). "left"/"right" for horizontal navigation (calendar/date-picker \
+month arrows, image carousels, horizontally-scrolling tab bars). Use \
+"right" to move to content further right/forward (e.g. the next month \
+in a date picker), "left" to move back/previous.
 - {"action": "done", "args": {"message": "<short summary of what was \
 accomplished, will be shown to the owner>"}} — use only once the goal is \
 ACTUALLY achieved, based on what "screen" shows right now, not before
@@ -156,6 +161,15 @@ fixed layout — different apps put navigation and search in different \
 places (a top bar in one app, a bottom tab in another). If what you \
 need isn't visible on screen at all yet, scroll first, then tap on the \
 next turn once it's visible.
+- Be careful with short, non-unique text like a bare day number (e.g. \
+"26" on a calendar/date picker). If a calendar or list could plausibly \
+show more than one element with that same short text (e.g. day 26 of \
+more than one visible month, or the same number in two different \
+places), a plain text match on "26" is ambiguous and might tap the \
+wrong one silently. When you can see multiple candidates like this, \
+either use "index:N" for the SPECIFIC one you mean (never a generic \
+text match), or confirm from context (visible month/year label, \
+position in the grid) which one is actually correct before choosing.
 - "type_text" only works on a field that is CURRENTLY FOCUSED — check \
 the current "screen" JSON for a node with "focused": true before typing. \
 If the field you want to type into is not focused yet (e.g. right after \
@@ -228,7 +242,9 @@ the image, x=1000 is the right edge, y=0 is the top edge, y=1000 is the \
 bottom edge — regardless of the image's actual pixel dimensions
 - {"action": "open_app", "args": {"package": "<friendly app name>"}}
 - {"action": "type_text", "args": {"text": "<text to type>"}}
-- {"action": "scroll", "args": {"direction": "up" or "down"}}
+- {"action": "scroll", "args": {"direction": "up", "down", "left", or \
+"right"}} — "up"/"down" for vertical scrolling, "left"/"right" for \
+horizontal navigation (calendar month arrows, carousels)
 - {"action": "done", "args": {"message": "<short summary for the owner>"}}
 - {"action": "none", "args": {"reason": "<why you can't proceed>"}}
 
@@ -367,7 +383,7 @@ def _validate_loop_step(parsed: dict) -> dict:
     if missing:
         raise ReasoningError(f"Missing args {missing} for action {action!r}")
 
-    if action == "scroll" and args["direction"] not in ("up", "down"):
+    if action == "scroll" and args["direction"] not in ("up", "down", "left", "right"):
         raise ReasoningError(f"Invalid scroll direction: {args['direction']!r}")
 
     if action == "tap" and not str(args["target"]).strip():
@@ -416,7 +432,7 @@ def _validate_vision_step(parsed: dict) -> dict:
             raise ReasoningError(f"tap coordinates out of normalized 0-1000 bounds: {args}")
         args["x"], args["y"] = x, y
 
-    if action == "scroll" and args["direction"] not in ("up", "down"):
+    if action == "scroll" and args["direction"] not in ("up", "down", "left", "right"):
         raise ReasoningError(f"Invalid scroll direction: {args['direction']!r}")
 
     requires_confirmation = bool(parsed.get("requires_confirmation", False))
