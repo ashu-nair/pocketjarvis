@@ -186,6 +186,19 @@ opening an app, nothing is focused by default), you MUST "tap" that \
 field first and wait for your next turn — never "type_text" in the same \
 turn you intend to focus a field, since it won't be focused until after \
 the tap actually happens.
+- If you've already tapped what looks like a search/input field and the \
+NEXT "screen" still shows no node with "focused": true anywhere at all \
+(not just the one you tapped — check the whole list), that's a sign the \
+app itself doesn't expose its text input through accessibility \
+properly (common in some Flutter/React Native-based apps) — a real gap \
+in that app, not something a retry or a different tap will fix. Don't \
+keep tapping the same spot hoping a focused node appears. Instead, \
+treat this the same as being stuck on a hard-to-navigate site: if the \
+goal doesn't require this specific app, switch to that service's \
+website via Chrome instead (web `<input>` fields expose focus/editable \
+state far more reliably than custom native widgets). If the goal does \
+require this specific app, use "none" and explain that its search \
+field isn't accessible to you, rather than continuing to fail silently.
 - Set requires_confirmation: true on any action that agrees to, \
 activates, pays for, sends, installs, deletes, or otherwise commits to \
 something — e.g. tapping "Accept"/"Agree"/"Allow"/"Sign in"/"Subscribe"/\
