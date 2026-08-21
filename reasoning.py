@@ -126,6 +126,14 @@ pages). "left"/"right" for horizontal navigation (calendar/date-picker \
 month arrows, image carousels, horizontally-scrolling tab bars). Use \
 "right" to move to content further right/forward (e.g. the next month \
 in a date picker), "left" to move back/previous.
+- {"action": "send_screenshot", "args": {"caption": "<optional short \
+caption for the owner>"}} — capture the current screen and send it as \
+a photo to the owner over Telegram. Use when the goal asks for a \
+screenshot/photo of what's on screen, or when showing the owner the \
+current state is part of finishing the request. After it sends, you'll \
+be called again — typically follow with "done" if that was the last \
+thing the goal needed, or continue with other actions if more remains. \
+"caption" may be omitted or an empty string.
 - {"action": "done", "args": {"message": "<short summary of what was \
 accomplished, will be shown to the owner>"}} — use only once the goal is \
 ACTUALLY achieved, based on what "screen" shows right now, not before
@@ -211,6 +219,8 @@ commit to anything, just proceed normally.
 a real phone, right now — but for anything consequential, prefer \
 requires_confirmation over "none" so the owner gets a real choice \
 instead of the task just failing.
+- Do NOT set requires_confirmation on send_screenshot — showing the \
+owner their own screen never needs approval.
 - Check "history" before repeating yourself: if the same action was just \
 tried and didn't move things forward, don't just try it again — either \
 try something different or use "none" and explain you're stuck.
@@ -267,6 +277,10 @@ bottom edge — regardless of the image's actual pixel dimensions
 - {"action": "scroll", "args": {"direction": "up", "down", "left", or \
 "right"}} — "up"/"down" for vertical scrolling, "left"/"right" for \
 horizontal navigation (calendar month arrows, carousels)
+- {"action": "send_screenshot", "args": {"caption": "<optional short \
+caption for the owner>"}} — send the current screen as a photo to the \
+owner over Telegram (same meaning as in the tree-based path). "caption" \
+may be omitted or empty.
 - {"action": "done", "args": {"message": "<short summary for the owner>"}}
 - {"action": "none", "args": {"reason": "<why you can't proceed>"}}
 
@@ -274,7 +288,9 @@ Any action can also include:
   "requires_confirmation": true
   "confirmation_reason": "<one short sentence>"
 Use this for anything consequential (agrees/pays/sends/installs/deletes/\
-confirms), same as the normal reasoning layer.
+confirms), same as the normal reasoning layer. Do NOT set confirmation \
+on send_screenshot — showing the owner their own screen never needs \
+approval.
 
 Rules:
 - For "tap": pick the normalized (0-1000, 0-1000) position of the \
@@ -318,6 +334,8 @@ _VALID_LOOP_ACTIONS = {
     "type_text": {"text"},
     "tap": {"target"},
     "scroll": {"direction"},
+    # caption is optional — validated below without requiring the key
+    "send_screenshot": set(),
     "done": set(),
     "none": set(),
 }
@@ -327,6 +345,7 @@ _VALID_VISION_ACTIONS = {
     "type_text": {"text"},
     "tap": {"x", "y"},
     "scroll": {"direction"},
+    "send_screenshot": set(),
     "done": set(),
     "none": set(),
 }
@@ -411,13 +430,17 @@ def _validate_loop_step(parsed: dict) -> dict:
     if action == "tap" and not str(args["target"]).strip():
         raise ReasoningError("tap target was empty")
 
+    if action == "send_screenshot":
+        # Normalize optional caption so callers always see a string key.
+        args = {**args, "caption": str(args.get("caption", "")).strip()}
+
     requires_confirmation = bool(parsed.get("requires_confirmation", False))
     confirmation_reason = str(parsed.get("confirmation_reason", "")).strip()
 
-    # "done" and "none" don't execute anything, so confirmation doesn't
-    # apply to them — ignore the flag rather than erroring, in case a
-    # model response sets it inconsistently.
-    if action in ("done", "none"):
+    # "done"/"none" don't execute anything; "send_screenshot" only shows
+    # the owner their own screen — confirmation doesn't apply to any of
+    # these. Ignore the flag rather than erroring if a model sets it.
+    if action in ("done", "none", "send_screenshot"):
         requires_confirmation = False
 
     return {
@@ -457,9 +480,12 @@ def _validate_vision_step(parsed: dict) -> dict:
     if action == "scroll" and args["direction"] not in ("up", "down", "left", "right"):
         raise ReasoningError(f"Invalid scroll direction: {args['direction']!r}")
 
+    if action == "send_screenshot":
+        args = {**args, "caption": str(args.get("caption", "")).strip()}
+
     requires_confirmation = bool(parsed.get("requires_confirmation", False))
     confirmation_reason = str(parsed.get("confirmation_reason", "")).strip()
-    if action in ("done", "none"):
+    if action in ("done", "none", "send_screenshot"):
         requires_confirmation = False
 
     return {

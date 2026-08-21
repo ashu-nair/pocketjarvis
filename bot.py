@@ -20,6 +20,7 @@ code below it, since both paths return the same
 {action, args, requires_confirmation, confirmation_reason} shape.
 """
 
+import base64
 import os
 import time
 import logging
@@ -136,6 +137,35 @@ def send_message(chat_id, text):
         f"{API_BASE}/sendMessage",
         json={"chat_id": chat_id, "text": text},
         timeout=10,
+    )
+
+
+def send_photo(chat_id, image_b64: str, caption: str = "", mime_type: str = "image/jpeg"):
+    """Push a base64-encoded image to Telegram as a photo message."""
+    photo_bytes = base64.b64decode(image_b64)
+    # Guess a sensible filename from the MIME type so Telegram's client
+    # renders it as an image rather than a generic document.
+    ext = "jpg" if "jpeg" in (mime_type or "") else "png" if "png" in (mime_type or "") else "jpg"
+    files = {"photo": (f"screenshot.{ext}", photo_bytes, mime_type or "image/jpeg")}
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+    resp = requests.post(f"{API_BASE}/sendPhoto", data=data, files=files, timeout=30)
+    resp.raise_for_status()
+
+
+def _send_current_screenshot(chat_id, caption: str = "Current screen") -> None:
+    """
+    Capture via actions.get_screenshot() and push to Telegram. Shared by
+    the explicit send_screenshot agent action and the stuck-detection
+    path — same plumbing, two triggers.
+    """
+    screenshot = actions.get_screenshot()
+    send_photo(
+        chat_id,
+        screenshot["image"],
+        caption=caption or "Current screen",
+        mime_type=screenshot.get("mimeType", "image/jpeg"),
     )
 
 
@@ -264,7 +294,9 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
     history = session["history"]
 
     if execute_first is not None:
-        ok, result = _execute_action(execute_first["action"], execute_first["args"])
+        ok, result = _execute_action(
+            execute_first["action"], execute_first["args"], chat_id
+        )
         # Overwrite the "approved by owner" placeholder appended just
         # before this call with the real outcome, so history reflects
         # what actually happened, not just that it was approved.
@@ -407,8 +439,9 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
                 # reasoning.decide_next_step_vision() from the downscaled
                 # screenshot's coordinate space, so no further resolution
                 # is needed here. Any other action (open_app, type_text,
-                # scroll) needs no resolution at all and falls straight
-                # through to the confirmation/execution code below.
+                # scroll, send_screenshot) needs no resolution at all and
+                # falls straight through to the confirmation/execution
+                # code below.
             else:
                 args = {**args, "x": coords[0], "y": coords[1]}
 
@@ -424,10 +457,19 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
                     "result": "skipped: repeated tap at same location without progress — stopped to avoid a loop",
                 }
             )
+            # Same send-photo plumbing as the explicit send_screenshot
+            # action — stuck-detection is just a different trigger.
+            try:
+                _send_current_screenshot(
+                    chat_id,
+                    caption="I got stuck — here's what I see on the screen.",
+                )
+            except Exception as e:
+                log.warning("Failed to send stuck-state screenshot: %s", e)
             return (
                 "🤔 I tapped the same spot a couple of times without anything changing, "
-                "so I stopped instead of repeating it further. Worth checking the screen "
-                "manually — a dialog may need a different response than expected."
+                "so I stopped instead of repeating it further. Screenshot of what I see "
+                "is above — a dialog may need a different response than expected."
             )
 
         if decision["requires_confirmation"]:
@@ -440,7 +482,7 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
                 "Reply yes to proceed, or anything else to cancel."
             )
 
-        ok, result = _execute_action(action, args)
+        ok, result = _execute_action(action, args, chat_id)
         history.append({"action": action, "args": args, "result": result})
         if not ok:
             log.warning("Step failed: %s(%s) -> %s", action, args, result)
@@ -453,7 +495,7 @@ def continue_agent_loop(chat_id, session, execute_first=None) -> str:
     )
 
 
-def _execute_action(action: str, args: dict) -> tuple:
+def _execute_action(action: str, args: dict, chat_id) -> tuple:
     """
     Executes a single already-decided action. Returns (ok, result_str).
     Never raises — any failure (device rejects the action, tap target
@@ -461,6 +503,9 @@ def _execute_action(action: str, args: dict) -> tuple:
     exception, so the caller can feed it into history for Gemini to see
     and adjust on the next turn, the same recoverable-by-design approach
     as before the confirmation gate existed.
+
+    chat_id is needed for send_screenshot (Telegram sendPhoto); ignored
+    by every other action.
     """
     try:
         if action == "open_app":
@@ -473,6 +518,11 @@ def _execute_action(action: str, args: dict) -> tuple:
 
         if action == "scroll":
             actions.scroll(args["direction"])
+            return True, "ok"
+
+        if action == "send_screenshot":
+            caption = (args.get("caption") or "").strip() or "Current screen"
+            _send_current_screenshot(chat_id, caption=caption)
             return True, "ok"
 
         if action == "tap":
