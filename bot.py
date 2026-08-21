@@ -30,6 +30,7 @@ load_dotenv()
 import actions
 import reasoning
 import screen
+import voice
 
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -141,12 +142,35 @@ def send_message(chat_id, text):
 def handle_message(message):
     chat_id = message["chat"]["id"]
     sender_id = str(message["from"]["id"])
-    text = message.get("text", "")
 
     # Security gate: only respond to the configured owner.
     if sender_id != str(ALLOWED_USER_ID):
         log.warning("Ignored message from unauthorized user_id=%s", sender_id)
         return
+
+    # Push-to-talk: a voice note is transcribed offline (voice.py, Vosk +
+    # ffmpeg) into plain text, then dropped into the exact same
+    # dispatch_command / handle_confirmation_reply path as a typed
+    # message below — voice is purely an input adapter, nothing
+    # downstream needs to know the command didn't arrive as text.
+    voice_note = message.get("voice")
+    if voice_note:
+        try:
+            text = voice.transcribe_voice_message(voice_note["file_id"])
+        except voice.VoiceError as e:
+            log.warning("Voice transcription failed: %s", e)
+            send_message(chat_id, f"🎤⚠️ Couldn't understand that: {e}")
+            return
+        log.info("Transcribed voice: %s", text)
+        # Echo the transcript back before acting on it. STT isn't
+        # perfect, and this bot executes real taps/purchases — the owner
+        # should see what was heard rather than trust it blindly, the
+        # same spirit as the confirmation gate further down the pipeline.
+        send_message(chat_id, f"🎤 Heard: \u201c{text}\u201d")
+    else:
+        text = message.get("text", "")
+        if not text:
+            return  # no text, no voice (e.g. a sticker) — nothing to act on
 
     log.info("Received: %s", text)
 
