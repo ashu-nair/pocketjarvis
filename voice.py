@@ -5,61 +5,53 @@ Telegram voice notes arrive as Opus-in-Ogg (.oga), referenced by a
 file_id — not raw audio bytes. This module:
   1. Resolves file_id -> a downloadable file_path via Telegram's getFile
   2. Downloads the .oga bytes
-  3. Converts to 16kHz mono PCM WAV via ffmpeg (the exact format Vosk's
-     KaldiRecognizer expects)
-  4. Transcribes with a local, offline Vosk model
+  3. Converts to 16kHz mono PCM WAV via ffmpeg (the format whisper.cpp
+     expects)
+  4. Transcribes by shelling out to a compiled whisper.cpp `whisper-cli`
+     binary — deliberately NOT the `vosk` pip package: Vosk hasn't
+     shipped a release since ~2022, and its PyPI wheels are only built
+     for specific Python ABI versions, which likely doesn't include
+     newer interpreters (e.g. 3.13) — pip would fall back to compiling
+     from source, which needs a full Kaldi toolchain and is exactly the
+     kind of fragile build step you don't want on a phone. whisper.cpp
+     sidesteps this entirely: it's a native binary invoked via
+     subprocess, same as ffmpeg already is below, so there's no Python
+     package/wheel compatibility question at all.
 
 Deliberately offline: no external STT API call, so this doesn't touch
 Gemini's rate limits and doesn't add a new internet-dependent service to
 babysit. Only cost is local CPU + a one-time model download.
 
 Setup (once, in Termux):
-    pkg install ffmpeg
-    pip install vosk
-    # download e.g. vosk-model-small-en-us-0.15, unzip it somewhere, then
-    # point VOSK_MODEL_PATH (.env) at the extracted folder.
+    pkg install ffmpeg git cmake clang -y
+    git clone https://github.com/ggerganov/whisper.cpp
+    cd whisper.cpp
+    cmake -B build && cmake --build build --config Release -j4
+    bash ./models/download-ggml-model.sh tiny.en
+    # then point .env at the resulting binary + model:
+    #   WHISPER_CLI_PATH=/path/to/whisper.cpp/build/bin/whisper-cli
+    #   WHISPER_MODEL_PATH=/path/to/whisper.cpp/models/ggml-tiny.en.bin
 """
 
 import os
-import json
-import wave
 import subprocess
 import tempfile
 import logging
 
 import requests
-from vosk import Model, KaldiRecognizer
 
 log = logging.getLogger("pocket-jarvis")
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 FILE_BASE = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
-VOSK_MODEL_PATH = os.environ.get("VOSK_MODEL_PATH")
-
-# Lazy-loaded once, reused across calls. Loading the model is the slow
-# part (~seconds); transcribing a short push-to-talk clip is fast once
-# it's loaded.
-_model = None
+WHISPER_CLI_PATH = os.environ.get("WHISPER_CLI_PATH", "whisper-cli")
+WHISPER_MODEL_PATH = os.environ.get("WHISPER_MODEL_PATH")
 
 
 class VoiceError(Exception):
     """Raised for any step (download/convert/transcribe) failing, so the
     caller can send a clean Telegram reply instead of a bare traceback."""
-
-
-def _get_model() -> Model:
-    global _model
-    if _model is None:
-        if not VOSK_MODEL_PATH or not os.path.isdir(VOSK_MODEL_PATH):
-            raise VoiceError(
-                f"VOSK_MODEL_PATH not set or not a directory: {VOSK_MODEL_PATH!r}. "
-                "Download a model (e.g. vosk-model-small-en-us-0.15) and point "
-                "VOSK_MODEL_PATH at the extracted folder in .env."
-            )
-        log.info("Loading Vosk model from %s ...", VOSK_MODEL_PATH)
-        _model = Model(VOSK_MODEL_PATH)
-    return _model
 
 
 def _download_voice_file(file_id: str) -> str:
@@ -106,23 +98,54 @@ def _convert_to_wav(oga_path: str) -> str:
 
 
 def _transcribe_wav(wav_path: str) -> str:
-    model = _get_model()
-    with wave.open(wav_path, "rb") as wf:
-        if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
-            raise VoiceError("Converted WAV isn't mono 16-bit PCM — conversion step is broken.")
-        rec = KaldiRecognizer(model, wf.getframerate())
-        rec.SetWords(False)
+    """Shells out to whisper-cli, which writes a plain-text transcript
+    to <out_prefix>.txt (-otxt) rather than parsing stdout — stdout's
+    exact formatting (timestamps, progress lines) has changed across
+    whisper.cpp versions before, so the file output is the more stable
+    contract to depend on."""
+    if not WHISPER_MODEL_PATH or not os.path.isfile(WHISPER_MODEL_PATH):
+        raise VoiceError(
+            f"WHISPER_MODEL_PATH not set or not a file: {WHISPER_MODEL_PATH!r}. "
+            "Run models/download-ggml-model.sh (e.g. tiny.en) in your whisper.cpp "
+            "checkout and point WHISPER_MODEL_PATH at the resulting .bin in .env."
+        )
 
-        text_parts = []
-        while True:
-            data = wf.readframes(4000)
-            if len(data) == 0:
-                break
-            if rec.AcceptWaveform(data):
-                text_parts.append(json.loads(rec.Result()).get("text", ""))
-        text_parts.append(json.loads(rec.FinalResult()).get("text", ""))
+    out_prefix = wav_path[:-4] if wav_path.endswith(".wav") else wav_path
+    txt_path = out_prefix + ".txt"
 
-    return " ".join(p for p in text_parts if p).strip()
+    try:
+        subprocess.run(
+            [
+                WHISPER_CLI_PATH,
+                "-m", WHISPER_MODEL_PATH,
+                "-f", wav_path,
+                "-otxt", "-of", out_prefix,
+                "-l", "en",
+                "-nt",  # no timestamps in the output text
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        raise VoiceError(
+            f"whisper-cli not found at {WHISPER_CLI_PATH!r} — build whisper.cpp "
+            "and set WHISPER_CLI_PATH to build/bin/whisper-cli in .env."
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode(errors="replace")[:300] if e.stderr else "unknown error"
+        raise VoiceError(f"whisper-cli failed: {stderr}")
+
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        raise VoiceError(f"whisper-cli ran but produced no output file: {e}")
+    finally:
+        if os.path.exists(txt_path):
+            os.remove(txt_path)
+
+    return text.strip()
 
 
 def transcribe_voice_message(file_id: str) -> str:
